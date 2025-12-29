@@ -114,8 +114,6 @@ trigger:
     minutes: !input start_minute
   - platform: time_pattern
     minutes: !input end_minute
-  - platform: time_pattern
-    minutes: "/15"
 action:
   - choose:
       - conditions:
