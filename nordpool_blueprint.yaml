@@ -113,7 +113,7 @@ action:
         {% set price = prices[h] %} 
         {% set sorted_prices = prices | sort %} 
         {% set above_low = prices[h] - sorted_prices[0] %} 
-        {% set diff = sorted_prices[23] - sorted_prices[0] %} 
+        {% set diff = sorted_prices[-1] - sorted_prices[0] %} 
         {% set ratio = ( above_low / diff ) * 100 | round %} 
         {% set rank = sorted_prices.index(price) + 1 %}
         {% set seton = ( m | int == start_minute_var | int and start_minute_var | int != end_minute_var | int ) or price | float <= allways_on_var | float or ratio | int <= hour_ratio_var | int or rank | int <= hour_rank_var | int %}
