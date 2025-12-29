@@ -86,24 +86,27 @@ variables:
   allways_on_var: !input allways_on
   allways_off_var: !input allways_off
   start_minute_var: !input start_minute
+  prices: "{{ state_attr(grid_area_var, 'today') | list }}"
+  h: "{{ now().hour }}"
+  m: "{{ now().minute }}"
+  price: "{{ prices[h] }}"
+  sorted_prices: "{{ prices | sort }}"
+  above_low: "{{ prices[h] - sorted_prices[0] }}"
+  diff: "{{ sorted_prices[23] - sorted_prices[0] }}"
+  ratio: "{{ ( above_low / diff ) * 100 | round }}"
+  rank: "{{ sorted_prices.index(price) + 1 }}"
+  condition_allways_on_price: "{{ price | float <= allways_on_var | float }}"
+  condition_price_ratio: "{{ ratio | int <= hour_ratio_var | int }}"
+  condition_rank_cheapest_hours: "{{ rank | int <= hour_rank_var | int }}"
+  seton: "{{ condition_allways_on_price or condition_price_ratio or condition_rank_cheapest_hours }}"
+  result: "{{ price < allways_off_var and seton }}"
 trigger:
   - platform: time_pattern
     minutes: !input start_minute
 action:
-- choose:
-  - conditions:
-    - condition: template
-      value_template: >-
-        {% set prices = state_attr(grid_area_var, 'today') | list %} 
-        {% set h = now().hour %} 
-        {% set m = now().minute %}
-        {% set price = prices[h] %} 
-        {% set sorted_prices = prices | sort %} 
-        {% set above_low = prices[h] - sorted_prices[0] %} 
-        {% set diff = sorted_prices[23] - sorted_prices[0] %} 
-        {% set ratio = ( above_low / diff ) * 100 | round %} 
-        {% set rank = sorted_prices.index(price) + 1 %}
-        {% set seton = ( m | int == start_minute_var | int and start_minute_var | int ) or price | float <= allways_on_var | float or ratio | int <= hour_ratio_var | int or rank | int <= hour_rank_var | int %}
-        {{ price | float < allways_off_var | float and seton }}
-    sequence: !input turnon
-  default: !input turnoff
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ result }}"
+        sequence: !input turnon
+    default: !input turnoff
