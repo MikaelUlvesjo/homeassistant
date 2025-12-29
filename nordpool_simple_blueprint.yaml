@@ -13,16 +13,6 @@ blueprint:
           - sensor
           integration: nordpool
           multiple: false
-    start_minute:
-      name: Start minute
-      description: Set the minute in hour to check if the price is low
-      default: 0
-      selector:
-        number:
-          min: 0.0
-          max: 59.0
-          mode: slider
-          step: 1.0
     hour_rank:
       name: Hours on
       description: Set the minimum of hours per day that the devices should be on
@@ -81,28 +71,27 @@ blueprint:
   source_url: https://github.com/MikaelUlvesjo/homeassistant/blob/main/nordpool_blueprint.yaml
 variables:
   grid_area_var: !input grid_area
-  hour_rank_var: !input hour_rank
+  hour_rank_input: !input hour_rank
+  hour_rank_var: "{{ (hour_rank_input | float * 4) | int }}"
   hour_ratio_var: !input hour_ratio
   allways_on_var: !input allways_on
   allways_off_var: !input allways_off
-  start_minute_var: !input start_minute
+  idx: "{{ (now().hour * 4) + (now().minute // 15) }}"
   prices: "{{ state_attr(grid_area_var, 'today') | list }}"
-  h: "{{ now().hour }}"
-  m: "{{ now().minute }}"
-  price: "{{ prices[h] }}"
+  price: "{{ prices[idx] | float if idx < (prices | length) else prices[-1] | float }}"
   sorted_prices: "{{ prices | sort }}"
-  above_low: "{{ prices[h] - sorted_prices[0] }}"
-  diff: "{{ sorted_prices[23] - sorted_prices[0] }}"
-  ratio: "{{ ( above_low / diff ) * 100 | round }}"
+  above_low: "{{ price - sorted_prices[0] }}"
+  diff: "{{ sorted_prices[-1] - sorted_prices[0] }}"
+  ratio: "{{ ( (above_low / diff) * 100 ) | round if diff > 0 else 0 }}"
   rank: "{{ sorted_prices.index(price) + 1 }}"
-  condition_allways_on_price: "{{ price | float <= allways_on_var | float }}"
+  condition_allways_on_price: "{{ price <= allways_on_var | float }}"
   condition_price_ratio: "{{ ratio | int <= hour_ratio_var | int }}"
   condition_rank_cheapest_hours: "{{ rank | int <= hour_rank_var | int }}"
   seton: "{{ condition_allways_on_price or condition_price_ratio or condition_rank_cheapest_hours }}"
   result: "{{ price < allways_off_var and seton }}"
 trigger:
   - platform: time_pattern
-    minutes: !input start_minute
+    minutes: "/15"
 action:
   - choose:
       - conditions:
@@ -110,3 +99,4 @@ action:
             value_template: "{{ result }}"
         sequence: !input turnon
     default: !input turnoff
+mode: single
