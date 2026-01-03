@@ -94,35 +94,46 @@ action:
     response_variable: daily_data
 
   - variables:
-      # Calculate total price (spot + VAT + fees) in local currency per kWh
+      # 1. Process prices and store as a clean list of floats
       prices_total: >
         {% set region = daily_data.keys() | first %}
         {% set ns = namespace(p=[]) %}
         {% for item in daily_data[region] %}
           {% set spot_kwh = item.price | float(0) / 1000 %}
-          {% set total = (spot_kwh * vat_multiplier_var | float(1.0)) + fixed_fees_var | float(0) %}
+          {% set total = (spot_kwh * (vat_multiplier_var | float(1.0))) + (fixed_fees_var | float(0)) %}
           {% set ns.p = ns.p + [total | round(4)] %}
         {% endfor %}
         {{ ns.p }}
       
+      # 2. Get current price index (supports 15-min or 60-min data)
       idx: >
-        {% if prices_total | length > 24 %}
+        {% set count = prices_total | length %}
+        {% if count > 24 %}
           {{ (now().hour * 4) + (now().minute // 15) }}
         {% else %}
           {{ now().hour }}
         {% endif %}
-      
+
+      # 3. Define price and sorted list
       price: "{{ prices_total[idx | int] | float(0) if (idx | int) < (prices_total | length) else prices_total[-1] | float(0) }}"
       sorted_prices: "{{ prices_total | sort | list }}"
-      above_low: "{{ price - sorted_prices }}"
-      diff: "{{ sorted_prices[-1] - sorted_prices }}"
-      ratio: "{{ ( (above_low / diff) * 100 ) | round if diff > 0 else 0 }}"
-      rank: "{{ sorted_prices.index(price) + 1 }}"
+
+      # 4. FIXED MATH: Use 'min' and 'max' filters to get single float values for subtraction
+      min_p: "{{ sorted_prices | min | float(0) }}"
+      max_p: "{{ sorted_prices | max | float(0) }}"
       
+      above_low: "{{ (price | float(0)) - (min_p | float(0)) }}"
+      diff: "{{ (max_p | float(0)) - (min_p | float(0)) }}"
+      
+      # 5. Calculation of Rank and Ratio
+      ratio: "{{ ( (above_low | float / diff | float) * 100 ) | round if diff | float > 0 else 0 }}"
+      rank: "{{ (sorted_prices.index(price | float) + 1) | int if price in sorted_prices else 99 }}"
+      
+      # 6. Final Result
       condition_rank: "{{ rank | int <= (hour_rank_input | float * (prices_total | length / 24)) | int }}"
       seton: >
         {{ price <= (allways_on_var | float(0)) or 
-           (ratio | int <= hour_ratio_var | int) or 
+           (ratio | int <= (hour_ratio_var | int)) or 
            condition_rank }}
       result: "{{ price < (allways_off_var | float(0)) and seton }}"
 
