@@ -1,86 +1,24 @@
-blueprint:
-  name: Nordpool price based on off
-  description: >
-    This blueprint uses the nordpool integration and lets you turn on
-    devices on the cheapest hours. (Updated for 2026 service calls)
-  domain: automation
-  input:
-    nordpool_config:
-      name: Nord Pool Configuration Entry
-      description: "Found in Developer Tools > Actions > Nord Pool: Get prices (YAML mode)"
-      selector:
-        text:
-    hour_rank:
-      name: Hours on
-      description: Set the minimum of hours per day that the devices should be on
-      default: 12
-      selector:
-        number:
-          min: 0.0
-          max: 24.0
-          mode: slider
-          step: 1.0
-    hour_ratio:
-      name: Hour percent
-      default: 50
-      selector:
-        number:
-          min: 0.0
-          max: 100.0
-          mode: slider
-          step: 5.0
-    allways_on:
-      name: Always on price
-      default: 0.0
-      selector:
-        number:
-          min: 0.0
-          max: 20.0
-          mode: slider
-          step: 0.1
-    allways_off:
-      name: Always off price
-      default: 20
-      selector:
-        number:
-          min: 0.0
-          max: 20.0
-          mode: slider
-          step: 0.1
-    turnon:
-      name: TurnOn
-      default: []
-      selector:
-        action: {}
-    turnoff:
-      name: TurnOff
-      default: []
-      selector:
-        action: {}
-
-variables:
-  hour_rank_input: !input hour_rank
-  hour_ratio_var: !input hour_ratio
-  allways_on_var: !input allways_on
-  allways_off_var: !input allways_off
-
-trigger:
-  - platform: time_pattern
-    minutes: "/15"
-
 action:
   - action: nordpool.get_prices_for_date
     data:
       config_entry: !input nordpool_config
       date: "{{ now().date() }}"
     response_variable: daily_data
+
   - variables:
-      # Extract prices list from response
+      # 1. Dynamically find the region key and extract only the numeric 'price' values
+      #    and convert from ORE to KR by dividing by 100
       prices_raw: >
-        {% set area = daily_data.keys() | first %}
-        {{ daily_data[area] | map(attribute='value') | list }}
+        {% set region = daily_data.keys() | first %}
+        {% set data = namespace(values=[]) %}
+        {% for item in daily_data[region] %}
+          {% set converted_price = item.price | float(0) / 100 %}
+          {% set data.values = data.values + [converted_price] %}
+        {% endfor %}
+        {{ data.values }}
       
-      # Determine if data is 15-min (96 values) or 60-min (24 values)
+      # 2. Determine if current resolution is 15-min (96 values) or hourly (24 values)
+      #    Home Assistant handles the local timezone offset automatically using 'now()'
       idx: >
         {% if prices_raw | length > 24 %}
           {{ (now().hour * 4) + (now().minute // 15) }}
@@ -88,20 +26,23 @@ action:
           {{ now().hour }}
         {% endif %}
       
-      price: "{{ prices_raw[idx | int] | float if (idx | int) < (prices_raw | length) else prices_raw[-1] | float }}"
+      # 3. Get current price with a safety fallback
+      price: "{{ prices_raw[idx | int] | float(0) if (idx | int) < (prices_raw | length) else prices_raw[-1] | float(0) }}"
+      
+      # 4. Sorting and Ranking
       sorted_prices: "{{ prices_raw | sort }}"
-      above_low: "{{ price - sorted_prices[0] }}"
-      diff: "{{ sorted_prices[-1] - sorted_prices[0] }}"
+      above_low: "{{ price - sorted_prices }}"
+      diff: "{{ sorted_prices[-1] - sorted_prices }}"
       ratio: "{{ ( (above_low / diff) * 100 ) | round if diff > 0 else 0 }}"
       rank: "{{ sorted_prices.index(price) + 1 }}"
       
-      # Decision logic
-      condition_allways_on: "{{ price <= allways_on_var | float }}"
-      condition_ratio: "{{ ratio | int <= hour_ratio_var | int }}"
+      # 5. Decision Logic (All inputs are now compared against KR/kWh prices)
       condition_rank: "{{ rank | int <= (hour_rank_input | float * (prices_raw | length / 24)) | int }}"
-      
-      seton: "{{ condition_allways_on or condition_ratio or condition_rank }}"
-      result: "{{ price < (allways_off_var | float) and seton }}"
+      seton: >
+        {{ price <= (allways_on_var | float(0)) or 
+           (ratio | int <= hour_ratio_var | int) or 
+           condition_rank }}
+      result: "{{ price < (allways_off_var | float(0)) and seton }}"
 
   - choose:
       - conditions:
@@ -109,5 +50,3 @@ action:
             value_template: "{{ result }}"
         sequence: !input turnon
     default: !input turnoff
-
-mode: single
