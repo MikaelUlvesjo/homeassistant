@@ -1,5 +1,5 @@
 blueprint:
-  name: Nordpool simple price based on off
+  name: Nordpool price based on off
   description: Turns devices on/off based on total price including variable VAT and fixed fees. Supports 15-minute pricing.
   domain: automation
   input:
