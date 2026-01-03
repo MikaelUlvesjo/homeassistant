@@ -113,7 +113,7 @@ action:
         {% endif %}
       
       price: "{{ prices_total[idx | int] | float(0) if (idx | int) < (prices_total | length) else prices_total[-1] | float(0) }}"
-      sorted_prices: "{{ prices_total | sort }}"
+      sorted_prices: "{{ prices_total | sort | list }}"
       above_low: "{{ price - sorted_prices }}"
       diff: "{{ sorted_prices[-1] - sorted_prices }}"
       ratio: "{{ ( (above_low / diff) * 100 ) | round if diff > 0 else 0 }}"
