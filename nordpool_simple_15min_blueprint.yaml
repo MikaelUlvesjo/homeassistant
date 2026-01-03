@@ -1,6 +1,6 @@
 blueprint:
-  name: Nordpool Dynamic Price Automation (2026)
-  description: Turns devices on/off based on total price including variable VAT and fixed fees.
+  name: Nordpool simple price based on off
+  description: Turns devices on/off based on total price including variable VAT and fixed fees. Supports 15-minute pricing.
   domain: automation
   input:
     nordpool_config_entry_id:
@@ -10,6 +10,9 @@ blueprint:
         text:
     hour_rank:
       name: Hours on
+      description: >
+        The minimum number of hours you want the device to run each day. 
+        The blueprint ranks all slots from cheapest to most expensive.
       default: 12
       selector:
         number:
@@ -19,6 +22,8 @@ blueprint:
           step: 1.0
     hour_ratio:
       name: Hour percent
+      description: >
+        Setting of 50% means the device is on if the price is in the lower half of the day's price range.
       default: 50
       selector:
         number:
@@ -26,18 +31,28 @@ blueprint:
           max: 100.0
           mode: slider
           step: 5.0
-    # New Input Field for VAT/Moms
+    price_divisor:
+      name: Price Divisor
+      description: >
+        Use 1000 to convert price/MWh to price/kWh.
+      default: 1000
+      selector:
+        number:
+          min: 1
+          max: 10000
+          step: 10
     vat_multiplier:
-      name: VAT Multiplier (e.g., 1.25 for 25% moms, 1.0 for 0%)
+      name: VAT Multiplier
+      description: "Handles local tax (e.g. 1.25 for 25% moms)."
       default: 1.25
       selector:
         number:
           min: 1.0
           max: 2.0
           step: 0.01
-    # New Input Field for Fixed Fees (e.g., Grid fees, certificates)
     fixed_fees_per_kwh:
-      name: Fixed Fees per kWh (in your local currency, e.g., SEK 0.125)
+      name: Fixed Fees per kWh
+      description: "Flat fees in local currency (e.g. 0.125 for 12.5 öre)."
       default: 0.125
       selector:
         number:
@@ -46,6 +61,7 @@ blueprint:
           step: 0.001
     allways_on:
       name: Always on price (Local Currency/kWh)
+      description: "If price drops below this, device stays on regardless of rank."
       default: 0.0
       selector:
         number:
@@ -55,6 +71,7 @@ blueprint:
           step: 0.05
     allways_off:
       name: Always off price (Local Currency/kWh)
+      description: "If price rises above this, device is forced off to protect against spikes."
       default: 2.5
       selector:
         number:
@@ -74,13 +91,13 @@ blueprint:
         action: {}
 
 variables:
-  # Map inputs to variables
   hour_rank_input: !input hour_rank
   hour_ratio_var: !input hour_ratio
   allways_on_var: !input allways_on
   allways_off_var: !input allways_off
   vat_multiplier_var: !input vat_multiplier
   fixed_fees_var: !input fixed_fees_per_kwh
+  divisor_var: !input price_divisor
 
 trigger:
   - platform: time_pattern
@@ -94,18 +111,16 @@ action:
     response_variable: daily_data
 
   - variables:
-      # 1. Process prices and store as a clean list of floats
       prices_total: >
         {% set region = daily_data.keys() | first %}
         {% set ns = namespace(p=[]) %}
         {% for item in daily_data[region] %}
-          {% set spot_kwh = item.price | float(0) / 1000 %}
-          {% set total = (spot_kwh * (vat_multiplier_var | float(1.0))) + (fixed_fees_var | float(0)) %}
+          {% set base_unit = item.price | float(0) / (divisor_var | float(1)) %}
+          {% set total = (base_unit * (vat_multiplier_var | float(1.0))) + (fixed_fees_var | float(0)) %}
           {% set ns.p = ns.p + [total | round(4)] %}
         {% endfor %}
         {{ ns.p }}
       
-      # 2. Get current price index (supports 15-min or 60-min data)
       idx: >
         {% set count = prices_total | length %}
         {% if count > 24 %}
@@ -114,22 +129,16 @@ action:
           {{ now().hour }}
         {% endif %}
 
-      # 3. Define price and sorted list
       price: "{{ prices_total[idx | int] | float(0) if (idx | int) < (prices_total | length) else prices_total[-1] | float(0) }}"
       sorted_prices: "{{ prices_total | sort | list }}"
-
-      # 4. FIXED MATH: Use 'min' and 'max' filters to get single float values for subtraction
       min_p: "{{ sorted_prices | min | float(0) }}"
       max_p: "{{ sorted_prices | max | float(0) }}"
       
       above_low: "{{ (price | float(0)) - (min_p | float(0)) }}"
       diff: "{{ (max_p | float(0)) - (min_p | float(0)) }}"
-      
-      # 5. Calculation of Rank and Ratio
-      ratio: "{{ ( (above_low | float / diff | float) * 100 ) | round if diff | float > 0 else 0 }}"
+      ratio: "{{ ( (above_low / diff) * 100 ) | round if diff > 0 else 0 }}"
       rank: "{{ (sorted_prices.index(price | float) + 1) | int if price in sorted_prices else 99 }}"
       
-      # 6. Final Result
       condition_rank: "{{ rank | int <= (hour_rank_input | float * (prices_total | length / 24)) | int }}"
       seton: >
         {{ price <= (allways_on_var | float(0)) or 
