@@ -1,19 +1,64 @@
 blueprint:
-  name: Nordpool price based on off (2026 Updated)
-  description: Updated to use nordpool.get_prices_for_date service.
+  name: Nordpool price based on off
+  description: >
+    This blueprint uses the nordpool integration and lets you turn on
+    devices on the cheapest hours. (Updated for 2026 service calls)
   domain: automation
   input:
-    # Use config_entry ID instead of entity_id for the service call
     nordpool_config:
       name: Nord Pool Configuration Entry
-      description: Found in Developer Tools > Actions > Nord Pool: Get prices (YAML mode)
+      description: "Found in Developer Tools > Actions > Nord Pool: Get prices (YAML mode)"
       selector:
         text:
-    # ... keep other inputs (hour_rank, hour_ratio, etc.) as they were ...
-    # (Simplified for brevity; keep your existing inputs here)
+    hour_rank:
+      name: Hours on
+      description: Set the minimum of hours per day that the devices should be on
+      default: 12
+      selector:
+        number:
+          min: 0.0
+          max: 24.0
+          mode: slider
+          step: 1.0
+    hour_ratio:
+      name: Hour percent
+      default: 50
+      selector:
+        number:
+          min: 0.0
+          max: 100.0
+          mode: slider
+          step: 5.0
+    allways_on:
+      name: Always on price
+      default: 0.0
+      selector:
+        number:
+          min: 0.0
+          max: 20.0
+          mode: slider
+          step: 0.1
+    allways_off:
+      name: Always off price
+      default: 20
+      selector:
+        number:
+          min: 0.0
+          max: 20.0
+          mode: slider
+          step: 0.1
+    turnon:
+      name: TurnOn
+      default: []
+      selector:
+        action: {}
+    turnoff:
+      name: TurnOff
+      default: []
+      selector:
+        action: {}
 
 variables:
-  # Static variables from inputs
   hour_rank_input: !input hour_rank
   hour_ratio_var: !input hour_ratio
   allways_on_var: !input allways_on
@@ -24,40 +69,40 @@ trigger:
     minutes: "/15"
 
 action:
-  # 1. Fetch current prices via service call
   - action: nordpool.get_prices_for_date
     data:
       config_entry: !input nordpool_config
       date: "{{ now().date() }}"
     response_variable: daily_data
-
-  # 2. Perform logic inside a 'variables' block within the action
   - variables:
-      # Extract list of price values from the response
-      # Note: 'prices' is typically a list of dicts like [{'value': 10, ...}, ...]
-      prices: >
+      # Extract prices list from response
+      prices_raw: >
         {% set area = daily_data.keys() | first %}
         {{ daily_data[area] | map(attribute='value') | list }}
       
-      # Logic for 15-minute intervals (96 slots per day) or hourly (24 slots)
-      idx: "{{ (now().hour * 4) + (now().minute // 15) if (prices | length > 24) else now().hour }}"
-      price: "{{ prices[idx] | float if idx < (prices | length) else prices[-1] | float }}"
-      sorted_prices: "{{ prices | sort }}"
+      # Determine if data is 15-min (96 values) or 60-min (24 values)
+      idx: >
+        {% if prices_raw | length > 24 %}
+          {{ (now().hour * 4) + (now().minute // 15) }}
+        {% else %}
+          {{ now().hour }}
+        {% endif %}
       
-      # Threshold calculations
+      price: "{{ prices_raw[idx | int] | float if (idx | int) < (prices_raw | length) else prices_raw[-1] | float }}"
+      sorted_prices: "{{ prices_raw | sort }}"
       above_low: "{{ price - sorted_prices[0] }}"
       diff: "{{ sorted_prices[-1] - sorted_prices[0] }}"
       ratio: "{{ ( (above_low / diff) * 100 ) | round if diff > 0 else 0 }}"
       rank: "{{ sorted_prices.index(price) + 1 }}"
       
-      # Final state determination
-      seton: >
-        {{ price <= allways_on_var | float or 
-           ratio | int <= hour_ratio_var | int or 
-           rank | int <= (hour_rank_input | float * (prices | length / 24)) | int }}
-      result: "{{ price < allways_off_var and seton }}"
+      # Decision logic
+      condition_allways_on: "{{ price <= allways_on_var | float }}"
+      condition_ratio: "{{ ratio | int <= hour_ratio_var | int }}"
+      condition_rank: "{{ rank | int <= (hour_rank_input | float * (prices_raw | length / 24)) | int }}"
+      
+      seton: "{{ condition_allways_on or condition_ratio or condition_rank }}"
+      result: "{{ price < (allways_off_var | float) and seton }}"
 
-  # 3. Execute actions based on calculated result
   - choose:
       - conditions:
           - condition: template
