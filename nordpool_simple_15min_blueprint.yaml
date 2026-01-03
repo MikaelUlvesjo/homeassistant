@@ -1,0 +1,68 @@
+blueprint:
+  name: Nordpool price based on off (2026 Updated)
+  description: Updated to use nordpool.get_prices_for_date service.
+  domain: automation
+  input:
+    # Use config_entry ID instead of entity_id for the service call
+    nordpool_config:
+      name: Nord Pool Configuration Entry
+      description: Found in Developer Tools > Actions > Nord Pool: Get prices (YAML mode)
+      selector:
+        text:
+    # ... keep other inputs (hour_rank, hour_ratio, etc.) as they were ...
+    # (Simplified for brevity; keep your existing inputs here)
+
+variables:
+  # Static variables from inputs
+  hour_rank_input: !input hour_rank
+  hour_ratio_var: !input hour_ratio
+  allways_on_var: !input allways_on
+  allways_off_var: !input allways_off
+
+trigger:
+  - platform: time_pattern
+    minutes: "/15"
+
+action:
+  # 1. Fetch current prices via service call
+  - action: nordpool.get_prices_for_date
+    data:
+      config_entry: !input nordpool_config
+      date: "{{ now().date() }}"
+    response_variable: daily_data
+
+  # 2. Perform logic inside a 'variables' block within the action
+  - variables:
+      # Extract list of price values from the response
+      # Note: 'prices' is typically a list of dicts like [{'value': 10, ...}, ...]
+      prices: >
+        {% set area = daily_data.keys() | first %}
+        {{ daily_data[area] | map(attribute='value') | list }}
+      
+      # Logic for 15-minute intervals (96 slots per day) or hourly (24 slots)
+      idx: "{{ (now().hour * 4) + (now().minute // 15) if (prices | length > 24) else now().hour }}"
+      price: "{{ prices[idx] | float if idx < (prices | length) else prices[-1] | float }}"
+      sorted_prices: "{{ prices | sort }}"
+      
+      # Threshold calculations
+      above_low: "{{ price - sorted_prices[0] }}"
+      diff: "{{ sorted_prices[-1] - sorted_prices[0] }}"
+      ratio: "{{ ( (above_low / diff) * 100 ) | round if diff > 0 else 0 }}"
+      rank: "{{ sorted_prices.index(price) + 1 }}"
+      
+      # Final state determination
+      seton: >
+        {{ price <= allways_on_var | float or 
+           ratio | int <= hour_ratio_var | int or 
+           rank | int <= (hour_rank_input | float * (prices | length / 24)) | int }}
+      result: "{{ price < allways_off_var and seton }}"
+
+  # 3. Execute actions based on calculated result
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ result }}"
+        sequence: !input turnon
+    default: !input turnoff
+
+mode: single
