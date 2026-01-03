@@ -1,8 +1,6 @@
 blueprint:
-  name: Nordpool price based on off (Service Call Updated)
-  description: >
-    This blueprint uses the current Nord Pool integration service calls to turn on
-    devices during the cheapest hours, converting öre/kWh prices to SEK/kWh.
+  name: Nordpool Dynamic Price Automation (2026)
+  description: Turns devices on/off based on total price including variable VAT and fixed fees.
   domain: automation
   input:
     nordpool_config_entry_id:
@@ -11,8 +9,7 @@ blueprint:
       selector:
         text:
     hour_rank:
-      name: Hours on (Total per day)
-      description: Set the minimum number of hours per day the devices should be on.
+      name: Hours on
       default: 12
       selector:
         number:
@@ -22,7 +19,6 @@ blueprint:
           step: 1.0
     hour_ratio:
       name: Hour percent
-      description: Max percent between minimum and maximum price of the day to turn on devices.
       default: 50
       selector:
         number:
@@ -30,35 +26,49 @@ blueprint:
           max: 100.0
           mode: slider
           step: 5.0
+    # New Input Field for VAT/Moms
+    vat_multiplier:
+      name: VAT Multiplier (e.g., 1.25 for 25% moms, 1.0 for 0%)
+      default: 1.25
+      selector:
+        number:
+          min: 1.0
+          max: 2.0
+          step: 0.01
+    # New Input Field for Fixed Fees (e.g., Grid fees, certificates)
+    fixed_fees_per_kwh:
+      name: Fixed Fees per kWh (in your local currency, e.g., SEK 0.125)
+      default: 0.125
+      selector:
+        number:
+          min: 0.0
+          max: 1.0
+          step: 0.001
     allways_on:
-      name: Always on price (SEK/kWh)
-      description: If the price is below this amount (in SEK/kWh), the device is always on.
+      name: Always on price (Local Currency/kWh)
       default: 0.0
       selector:
         number:
           min: 0.0
-          max: 20.0
+          max: 10.0
           mode: slider
-          step: 0.1
+          step: 0.05
     allways_off:
-      name: Always off price (SEK/kWh)
-      description: If the price is above this amount (in SEK/kWh), the device is always off.
-      default: 20
+      name: Always off price (Local Currency/kWh)
+      default: 2.5
       selector:
         number:
           min: 0.0
-          max: 20.0
+          max: 10.0
           mode: slider
-          step: 0.1
+          step: 0.05
     turnon:
       name: Turn On Actions
-      description: Actions to run to turn on devices.
       default: []
       selector:
         action: {}
     turnoff:
       name: Turn Off Actions
-      description: Actions to run to turn off devices.
       default: []
       selector:
         action: {}
@@ -69,58 +79,53 @@ variables:
   hour_ratio_var: !input hour_ratio
   allways_on_var: !input allways_on
   allways_off_var: !input allways_off
+  vat_multiplier_var: !input vat_multiplier
+  fixed_fees_var: !input fixed_fees_per_kwh
 
 trigger:
   - platform: time_pattern
     minutes: "/15"
 
 action:
-  # 1. Fetch prices from the Nord Pool service
   - action: nordpool.get_prices_for_date
     data:
       config_entry: !input nordpool_config_entry_id
       date: "{{ now().date() }}"
     response_variable: daily_data
 
-  # 2. Process the data and calculate the current state using temporary variables
   - variables:
-      # Convert raw öre/kWh price list to SEK/kWh list
-      prices_sek: >
+      # Calculate total price (spot + VAT + fees) in local currency per kWh
+      prices_total: >
         {% set region = daily_data.keys() | first %}
         {% set ns = namespace(p=[]) %}
         {% for item in daily_data[region] %}
-          {% set ns.p = ns.p + [(item.price | float(0) / 100)] %}
+          {% set spot_kwh = item.price | float(0) / 1000 %}
+          {% set total = (spot_kwh * vat_multiplier_var | float(1.0)) + fixed_fees_var | float(0) %}
+          {% set ns.p = ns.p + [total | round(4)] %}
         {% endfor %}
         {{ ns.p }}
       
-      # Determine the correct index for the current time (handles 15min/hourly data)
       idx: >
-        {% if prices_sek | length > 24 %}
+        {% if prices_total | length > 24 %}
           {{ (now().hour * 4) + (now().minute // 15) }}
         {% else %}
           {{ now().hour }}
         {% endif %}
       
-      # Get current price in SEK/kWh
-      price: "{{ prices_sek[idx | int] | float(0) if (idx | int) < (prices_sek | length) else prices_sek[-1] | float(0) }}"
-      
-      # Calculate thresholds and ranks
-      sorted_prices: "{{ prices_sek | sort }}"
-      above_low: "{{ price - sorted_prices[0] }}"
-      diff: "{{ sorted_prices[-1] - sorted_prices[0] }}"
+      price: "{{ prices_total[idx | int] | float(0) if (idx | int) < (prices_total | length) else prices_total[-1] | float(0) }}"
+      sorted_prices: "{{ prices_total | sort }}"
+      above_low: "{{ price - sorted_prices }}"
+      diff: "{{ sorted_prices[-1] - sorted_prices }}"
       ratio: "{{ ( (above_low / diff) * 100 ) | round if diff > 0 else 0 }}"
       rank: "{{ sorted_prices.index(price) + 1 }}"
       
-      # Final decision logic
-      # Scale the 'hours on' input based on total data points (96/24 intervals)
-      condition_rank: "{{ rank | int <= (hour_rank_input | float * (prices_sek | length / 24)) | int }}"
+      condition_rank: "{{ rank | int <= (hour_rank_input | float * (prices_total | length / 24)) | int }}"
       seton: >
         {{ price <= (allways_on_var | float(0)) or 
            (ratio | int <= hour_ratio_var | int) or 
            condition_rank }}
       result: "{{ price < (allways_off_var | float(0)) and seton }}"
 
-  # 3. Choose the action based on the final 'result'
   - choose:
       - conditions:
           - condition: template
