@@ -1,52 +1,131 @@
+blueprint:
+  name: Nordpool price based on off (Service Call Updated)
+  description: >
+    This blueprint uses the current Nord Pool integration service calls to turn on
+    devices during the cheapest hours, converting öre/kWh prices to SEK/kWh.
+  domain: automation
+  input:
+    nordpool_config_entry_id:
+      name: Nord Pool Configuration Entry ID
+      description: "Find this ID in Developer Tools > Actions > Nord Pool: Get prices (YAML mode)"
+      selector:
+        text:
+    hour_rank:
+      name: Hours on (Total per day)
+      description: Set the minimum number of hours per day the devices should be on.
+      default: 12
+      selector:
+        number:
+          min: 0.0
+          max: 24.0
+          mode: slider
+          step: 1.0
+    hour_ratio:
+      name: Hour percent
+      description: Max percent between minimum and maximum price of the day to turn on devices.
+      default: 50
+      selector:
+        number:
+          min: 0.0
+          max: 100.0
+          mode: slider
+          step: 5.0
+    allways_on:
+      name: Always on price (SEK/kWh)
+      description: If the price is below this amount (in SEK/kWh), the device is always on.
+      default: 0.0
+      selector:
+        number:
+          min: 0.0
+          max: 20.0
+          mode: slider
+          step: 0.1
+    allways_off:
+      name: Always off price (SEK/kWh)
+      description: If the price is above this amount (in SEK/kWh), the device is always off.
+      default: 20
+      selector:
+        number:
+          min: 0.0
+          max: 20.0
+          mode: slider
+          step: 0.1
+    turnon:
+      name: Turn On Actions
+      description: Actions to run to turn on devices.
+      default: []
+      selector:
+        action: {}
+    turnoff:
+      name: Turn Off Actions
+      description: Actions to run to turn off devices.
+      default: []
+      selector:
+        action: {}
+
+variables:
+  # Map inputs to variables
+  hour_rank_input: !input hour_rank
+  hour_ratio_var: !input hour_ratio
+  allways_on_var: !input allways_on
+  allways_off_var: !input allways_off
+
+trigger:
+  - platform: time_pattern
+    minutes: "/15"
+
 action:
+  # 1. Fetch prices from the Nord Pool service
   - action: nordpool.get_prices_for_date
     data:
-      config_entry: !input nordpool_config
+      config_entry: !input nordpool_config_entry_id
       date: "{{ now().date() }}"
     response_variable: daily_data
 
+  # 2. Process the data and calculate the current state using temporary variables
   - variables:
-      # 1. Dynamically find the region key and extract only the numeric 'price' values
-      #    and convert from ORE to KR by dividing by 100
-      prices_raw: >
+      # Convert raw öre/kWh price list to SEK/kWh list
+      prices_sek: >
         {% set region = daily_data.keys() | first %}
-        {% set data = namespace(values=[]) %}
+        {% set ns = namespace(p=[]) %}
         {% for item in daily_data[region] %}
-          {% set converted_price = item.price | float(0) / 100 %}
-          {% set data.values = data.values + [converted_price] %}
+          {% set ns.p = ns.p + [(item.price | float(0) / 100)] %}
         {% endfor %}
-        {{ data.values }}
+        {{ ns.p }}
       
-      # 2. Determine if current resolution is 15-min (96 values) or hourly (24 values)
-      #    Home Assistant handles the local timezone offset automatically using 'now()'
+      # Determine the correct index for the current time (handles 15min/hourly data)
       idx: >
-        {% if prices_raw | length > 24 %}
+        {% if prices_sek | length > 24 %}
           {{ (now().hour * 4) + (now().minute // 15) }}
         {% else %}
           {{ now().hour }}
         {% endif %}
       
-      # 3. Get current price with a safety fallback
-      price: "{{ prices_raw[idx | int] | float(0) if (idx | int) < (prices_raw | length) else prices_raw[-1] | float(0) }}"
+      # Get current price in SEK/kWh
+      price: "{{ prices_sek[idx | int] | float(0) if (idx | int) < (prices_sek | length) else prices_sek[-1] | float(0) }}"
       
-      # 4. Sorting and Ranking
-      sorted_prices: "{{ prices_raw | sort }}"
-      above_low: "{{ price - sorted_prices }}"
-      diff: "{{ sorted_prices[-1] - sorted_prices }}"
+      # Calculate thresholds and ranks
+      sorted_prices: "{{ prices_sek | sort }}"
+      above_low: "{{ price - sorted_prices[0] }}"
+      diff: "{{ sorted_prices[-1] - sorted_prices[0] }}"
       ratio: "{{ ( (above_low / diff) * 100 ) | round if diff > 0 else 0 }}"
       rank: "{{ sorted_prices.index(price) + 1 }}"
       
-      # 5. Decision Logic (All inputs are now compared against KR/kWh prices)
-      condition_rank: "{{ rank | int <= (hour_rank_input | float * (prices_raw | length / 24)) | int }}"
+      # Final decision logic
+      # Scale the 'hours on' input based on total data points (96/24 intervals)
+      condition_rank: "{{ rank | int <= (hour_rank_input | float * (prices_sek | length / 24)) | int }}"
       seton: >
         {{ price <= (allways_on_var | float(0)) or 
            (ratio | int <= hour_ratio_var | int) or 
            condition_rank }}
       result: "{{ price < (allways_off_var | float(0)) and seton }}"
 
+  # 3. Choose the action based on the final 'result'
   - choose:
       - conditions:
           - condition: template
             value_template: "{{ result }}"
         sequence: !input turnon
     default: !input turnoff
+
+mode: single
